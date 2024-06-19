@@ -1,0 +1,217 @@
+BASEFOLDERPATH="${PWD}"
+PROJECT_ID=
+OWNER=
+GSA=$PROJECT_ID-sa@$PROJECT_ID.iam.gserviceaccount.com
+GSA_DISPLAY_NAME=$PROJECT_ID-sa
+REGION=asia-south1
+ZONE=asia-south1-a
+VPC_NAME=""
+DEVOPS_VPC_NAME=""
+CLUSTER=
+DEPLOYMENTS_PATH=$BASEFOLDERPATH/deployments
+alias k=kubectl
+
+gcloud auth application-default login
+gcloud auth list
+gcloud config set account $OWNER
+
+gcloud config set project $PROJECT_ID
+
+gcloud services enable cloudresourcemanager.googleapis.com
+gcloud services enable compute.googleapis.com
+gcloud services enable container.googleapis.com
+gcloud services enable storage.googleapis.com
+gcloud services enable artifactregistry.googleapis.com
+gcloud services enable run.googleapis.com
+gcloud services enable aiplatform.googleapis.com
+gcloud services enable translate.googleapis.com
+gcloud services enable texttospeech.googleapis.com
+gcloud services enable vision.googleapis.com
+gcloud services enable apigee.googleapis.com
+gcloud services enable servicenetworking.googleapis.com
+gcloud services enable cloudkms.googleapis.com
+gcloud services enable mesh.googleapis.com
+gcloud services enable certificatemanager.googleapis.com
+gcloud services enable cloudbuild.googleapis.com
+gcloud services enable sqladmin.googleapis.com
+gcloud services enable redis.googleapis.com
+gcloud services enable secretmanager.googleapis.com
+
+gcloud config set compute/region $REGION
+gcloud config set compute/zone $ZONE
+
+gcloud iam service-accounts create $GSA_DISPLAY_NAME --display-name=$GSA_DISPLAY_NAME
+gcloud iam service-accounts list
+gcloud projects add-iam-policy-binding $PROJECT_ID --member=serviceAccount:$GSA --role=roles/owner
+gcloud projects add-iam-policy-binding $PROJECT_ID --member=serviceAccount:$GSA --role=roles/iam.serviceAccountUser
+gcloud projects add-iam-policy-binding $PROJECT_ID --member=serviceAccount:$GSA --role=roles/iam.serviceAccountTokenCreator
+================================================================================================================================
+Terraform
+==========
+State management
+=======================================================
+gcloud storage buckets create gs://$PROJECT_ID-tfs-stg --project=$PROJECT_ID --default-storage-class=STANDARD \
+--location=$REGION --uniform-bucket-level-access
+gcloud storage buckets list --project=$PROJECT_ID
+
+gcloud auth configure-docker asia-south1-docker.pkg.dev
+=======================================================
+GKE
+========
+
+Pre-Config
+===========
+cd $BASEFOLDERPATH
+
+WORKING_DIR="terraform-scripts/pre-config"
+TFSVARS_PATH="../../terraform-variables/dev/pre-config"
+TFSVARS_FILE_PATH="$TFSVARS_PATH/pre-config.tfvars"
+BKEND_CONFIG="$TFSVARS_PATH/backend.config"
+
+gcloud builds submit --config="./builds/infra/deploy-script.yaml" \
+--project=$PROJECT_ID --substitutions=_PROJECT_ID_=$PROJECT_ID,\
+_WORKING_DIR_="$WORKING_DIR",_TFSVARS_FILE_PATH_="$TFSVARS_FILE_PATH",\
+_BKEND_CONFIG_="$BKEND_CONFIG",_LOG_BUCKET_=$PROJECT_ID-tfs-stg
+
+#gcloud builds submit --config="./builds/infra/destroy-script.yaml" \
+--project=$PROJECT_ID --substitutions=_PROJECT_ID_=$PROJECT_ID,\
+_WORKING_DIR_="$WORKING_DIR",_TFSVARS_FILE_PATH_="$TFSVARS_FILE_PATH",\
+_BKEND_CONFIG_="$BKEND_CONFIG",_LOG_BUCKET_=$PROJECT_ID-tfs-stg
+====================================================================
+Setup
+===========
+cd $BASEFOLDERPATH
+
+WORKING_DIR="terraform-scripts/setup"
+TFSVARS_PATH="../../terraform-variables/dev/setup"
+TFSVARS_FILE_PATH="$TFSVARS_PATH/setup.tfvars"
+BKEND_CONFIG="$TFSVARS_PATH/backend.config"
+
+gcloud builds submit --config="./builds/infra/deploy-script.yaml" \
+--project=$PROJECT_ID --substitutions=_PROJECT_ID_=$PROJECT_ID,\
+_WORKING_DIR_="$WORKING_DIR",_TFSVARS_FILE_PATH_="$TFSVARS_FILE_PATH",\
+_BKEND_CONFIG_="$BKEND_CONFIG",_LOG_BUCKET_=$PROJECT_ID-tfs-stg
+
+#gcloud builds submit --config="./builds/infra/destroy-script.yaml" \
+--project=$PROJECT_ID --substitutions=_PROJECT_ID_=$PROJECT_ID,\
+_WORKING_DIR_="$WORKING_DIR",_TFSVARS_FILE_PATH_="$TFSVARS_FILE_PATH",\
+_BKEND_CONFIG_="$BKEND_CONFIG",_LOG_BUCKET_=$PROJECT_ID-tfs-stg
+====================================================================
+Connect to the Cluster
+=========================
+gcloud container clusters get-credentials $CLUSTER --project=$PROJECT_ID --region=$REGION
+
+#This should fail for Private GKe clusters
+k get no
+
+# Private GKe clusters will not allow you to get connected from anywhere;
+#can only connect from Authorized Networksas setup in the setup.tfvars file in the previous step
+
+Nginx Ingress controller
+=========================
+helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+helm repo update
+helm install -f $DEPLOYMENTS_PATH/configs/nginx-config.yaml nginx-dev ingress-nginx/ingress-nginx \
+-n nginx-dev --create-namespace
+#helm uninstall nginx-dev -n nginx-dev
+
+k get po -n nginx-dev
+
+# IP Masquerading
+==================
+k get daemonsets/ip-masq-agent -n kube-system
+k get configmaps/ip-masq-agent -n kube-system
+k create cm ip-masq-agent \
+   --namespace=kube-system \
+   --from-file=config=$BASEFOLDERPATH/deployments/configs/ip-masq-cm.yaml
+k describe configmaps/ip-masq-agent -n kube-system
+#k delete cm ip-masq-agent -n kube-system
+
+# Storage Class
+==================
+k apply -f $BASEFOLDERPATH/deployments/configs/pd-balanced-sc.yaml
+#k delete -f $BASEFOLDERPATH/deployments/configs/pd-balanced-sc.yaml
+
+gcloud storage buckets add-iam-policy-binding  \
+--member "serviceAccount:$GSA" --role "roles/storage.objectAdmin"
+
+# CSI Drive plugin
+==================
+helm repo add secrets-store-csi-driver https://kubernetes-sigs.github.io/secrets-store-csi-driver/charts
+helm install csi-secrets-store secrets-store-csi-driver/secrets-store-csi-driver --namespace kube-system \
+--set "syncSecret.enabled=true" --set "enableSecretRotation=true" 
+#helm uninstall csi-secrets-store --namespace kube-system
+
+k apply -f $BASEFOLDERPATH/deployments/configs/provider-gcp-plugin.yaml
+#k delete -f $BASEFOLDERPATH/deployments/configs/provider-gcp-plugin.yaml
+======================================================================
+
+# Cloud Build (Automation)
+==============================
+gcloud builds submit --config="./builds/configs/deploy-script.yaml" \
+--project=$PROJECT_ID --substitutions=_PROJECT_ID_=$PROJECT_ID,\
+_REGION_="$REGION",_CLUSTER_NAME_="$CLUSTER",\
+_LOG_BUCKET_=$PROJECT_ID-tfs-stg,_NGINX_CONFIG_PATH_="deployments/configs/nginx-config.yaml",\
+_NGINX_CONFIG_NAMESPACE_="nginx-dev",_IPMASQ_CONFIG_PATH_="deployments/configs/ip-masq-cm.yaml",\
+_STORAGE_CLASS_CONFIG_PATH_="deployments/configs/pd-balanced-sc.yaml",\
+_CSI_PLUGIN_PATH_="deployments/configs/provider-gcp-plugin.yaml"
+
+#gcloud builds submit --config="./builds/configs/destroy-script.yaml" \
+--project=$PROJECT_ID --substitutions=_PROJECT_ID_=$PROJECT_ID,\
+_REGION_="$REGION",_CLUSTER_NAME_="$CLUSTER",\
+_LOG_BUCKET_=$PROJECT_ID-tfs-stg,_NGINX_CONFIG_NAMESPACE_="nginx-dev",\
+_IPMASQ_CONFIG_PATH_="deployments/configs/ip-masq-cm.yaml",\
+_STORAGE_CLASS_CONFIG_PATH_="deployments/configs/pd-balanced-sc.yaml",\
+_CSI_PLUGIN_PATH_="deployments/configs/provider-gcp-plugin.yaml"
+===================================================================================================
+
+Smoke
+==============================================================================================================
+k create ns smoke
+k create serviceaccount smoke-sa -n smoke
+#k delete serviceaccount smoke-sa -n smoke
+
+gcloud iam service-accounts add-iam-policy-binding $GSA \
+    --role=roles/iam.workloadIdentityUser \
+    --member="serviceAccount:$PROJECT_ID.svc.id.goog[smoke/smoke-sa]"
+#gcloud iam service-accounts remove-iam-policy-binding $GSA \
+    --role=roles/iam.workloadIdentityUser \
+    --member="serviceAccount:$PROJECT_ID.svc.id.goog[smoke/smoke-sa]"
+
+k annotate serviceaccount smoke-sa -n smoke iam.gke.io/gcp-service-account=$GSA
+#k annotate serviceaccount smoke-sa -n smoke iam.gke.io/gcp-service-account-
+
+cd $DEPLOYMENTS_PATH/smoke
+helm create smoke-chart -n smoke
+
+helm upgrade --install --create-namespace smoke-chart-nginx $DEPLOYMENTS_PATH/smoke/smoke-chart/ -n smoke \
+-f $DEPLOYMENTS_PATH/values-dev/values-nginx.yaml
+#helm uninstall smoke-chart-nginx -n smoke
+
+k get po -n smoke
+
+# Cloud Build (Automation)
+==============================
+gcloud builds submit --config="./builds/apps/deploy-script.yaml" \
+--project=$PROJECT_ID --substitutions=_PROJECT_ID_=$PROJECT_ID,\
+_REGION_="$REGION",_CLUSTER_NAME_="$CLUSTER",\
+_LOG_BUCKET_=$PROJECT_ID-tfs-stg,_K8S_NAMESPACE_="smoke",\
+_HELM_CHART_NAME_="smoke-chart-nginx",_HELM_CHART_PATH_="deployments/smoke/smoke-chart/",\
+_HELM_VALUES_PATH_="deployments/values-dev/values-nginx.yaml"
+
+#gcloud builds submit --config="./builds/apps/destroy-script.yaml" \
+--project=$PROJECT_ID --substitutions=_PROJECT_ID_=$PROJECT_ID,\
+_REGION_="$REGION",_CLUSTER_NAME_="$CLUSTER",_K8S_NAMESPACE_="smoke",\
+_LOG_BUCKET_=$PROJECT_ID-tfs-stg,_HELM_CHART_NAME_="smoke-chart-nginx"
+==========================================================================================
+k get po -n smoke
+k get ing -n smoke
+========================
+k get po -n registry
+==============================================================================================================
+/*
+gcloud secrets add-iam-policy-binding \
+    --member=serviceAccount:$GSA \
+    --role=roles/secretmanager.secretAccessor
+gcloud secrets get-iam-policy-binding 
+*/
