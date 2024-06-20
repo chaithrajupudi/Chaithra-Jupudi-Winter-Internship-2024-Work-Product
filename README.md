@@ -120,7 +120,7 @@ The following are the resources that need to be confiugured only once amnd then 
         - CSI Secret storage driver plugin to mount Secrets onto a volume from Secret Manager; as well as sync with K8s secrets/environment variables
     - **smoke**
       - helm chart for deploying **smoke** testing services
-    - **<Other application specific microservices>**
+    - **Other application specific microservices**
     - **values-$ENV**
       - **Values** yaml files for each microservice acorss all namespaces and across **dev** environment
       - Passed as argumenst to each **helm chart template**
